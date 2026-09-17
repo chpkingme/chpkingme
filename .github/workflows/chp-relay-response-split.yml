@@ -1,0 +1,52 @@
+name: CHP Encrypted Relay Response Chunker
+
+on:
+  push:
+    branches:
+      - chp-live-provider-20260917
+    paths:
+      - '.chp-relay/response-*.b64'
+
+permissions:
+  contents: write
+
+jobs:
+  split-encrypted-response:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Split new encrypted response into connector-safe chunks
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          API_BASE="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+          BEFORE="${{ github.event.before }}"
+          AFTER="${{ github.sha }}"
+          FILES=$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" -H 'Accept: application/vnd.github+json' "${API_BASE}/compare/${BEFORE}...${AFTER}" | jq -r '.files[]?.filename | select(test("^\\.chp-relay/response-.*\\.b64$"))')
+          for PATHNAME in $FILES; do
+            NAME="$(basename "$PATHNAME" .b64)"
+            RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_REF_NAME}/${PATHNAME}"
+            curl -fsSL "$RAW?nonce=${GITHUB_RUN_ID}" -o /tmp/source.b64
+            BYTES=$(wc -c < /tmp/source.b64)
+            SHA=$(sha256sum /tmp/source.b64 | awk '{print $1}')
+            rm -f /tmp/chunk-*
+            split -b 48000 -d -a 4 /tmp/source.b64 /tmp/chunk-
+            COUNT=$(find /tmp -maxdepth 1 -name 'chunk-*' -type f | wc -l)
+            N=0
+            for F in /tmp/chunk-*; do
+              N=$((N+1)); PAD=$(printf '%04d' "$N")
+              base64 -w0 "$F" > /tmp/content.b64
+              DEST=".chp-relay/chunks/${NAME}-part-${PAD}.txt"
+              CONTENT=$(cat /tmp/content.b64)
+              jq -n --arg message "chp: chunk ${NAME} ${PAD}" --arg content "$CONTENT" --arg branch "$GITHUB_REF_NAME" '{message:$message,content:$content,branch:$branch}' > /tmp/upload.json
+              curl -fsSL -X PUT -H "Authorization: Bearer ${GH_TOKEN}" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "${API_BASE}/contents/${DEST}" --data-binary @/tmp/upload.json >/dev/null
+            done
+            jq -n --arg name "$NAME" --arg sha "$SHA" --argjson bytes "$BYTES" --argjson count "$COUNT" '{schema:"chp.encrypted-response-chunks.v1",name:$name,source_sha256:$sha,source_bytes:$bytes,part_count:$count,chunk_bytes:48000}' > /tmp/manifest.json
+            base64 -w0 /tmp/manifest.json > /tmp/manifest-content.b64
+            CONTENT=$(cat /tmp/manifest-content.b64)
+            DEST=".chp-relay/chunks/${NAME}-manifest.json"
+            jq -n --arg message "chp: chunk manifest ${NAME}" --arg content "$CONTENT" --arg branch "$GITHUB_REF_NAME" '{message:$message,content:$content,branch:$branch}' > /tmp/upload.json
+            curl -fsSL -X PUT -H "Authorization: Bearer ${GH_TOKEN}" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "${API_BASE}/contents/${DEST}" --data-binary @/tmp/upload.json >/dev/null
+            echo "CHP_SPLIT_RESPONSE=${NAME} PARTS=${COUNT} BYTES=${BYTES} SHA=${SHA}"
+          done
