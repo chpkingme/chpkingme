@@ -1,0 +1,34 @@
+name: CHP Upload Compact Cipher Artifact 35218817451
+
+on:
+  push:
+    branches:
+      - chp-live-provider-20260917
+    paths:
+      - .github/workflows/chp-upload-compact-artifact-35218817451.yml
+
+permissions:
+  contents: read
+
+jobs:
+  upload-compact:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          ref: chp-live-provider-20260917
+      - name: Reassemble verified compact ciphertext
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE='.chp-extract-gz/result-35218817451'
+          cat "$BASE/part-0001.txt" "$BASE/part-0002.txt" > compact-final.b64
+          test "$(wc -c < compact-final.b64)" = '64344'
+          test "$(sha256sum compact-final.b64 | awk '{print $1}')" = '62bd4d43fceee2956f36c577233679ecdb160eed347cdb84f4cc19c652760f7c'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chp-compact-final-35218817451
+          path: compact-final.b64
+          if-no-files-found: error
+          compression-level: 9
