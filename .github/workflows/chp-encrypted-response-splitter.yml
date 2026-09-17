@@ -1,0 +1,45 @@
+name: CHP Encrypted Response Splitter
+
+on:
+  push:
+    branches:
+      - chp-live-provider-20260917
+    paths:
+      - '.chp-relay/response-*.b64'
+
+permissions:
+  contents: write
+
+jobs:
+  split-encrypted-response:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          ref: chp-live-provider-20260917
+      - name: Split encrypted response into retrievable chunks
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILE="$(git diff --name-only HEAD^ HEAD | grep -E '^\.chp-relay/response-[0-9]+-[0-9]{4}\.b64$' | head -n1 || true)"
+          if [ -z "$FILE" ]; then
+            echo 'CHP_SPLITTER=NO_RESPONSE_FILE'
+            exit 0
+          fi
+          BASE="$(basename "$FILE" .b64)"
+          OUT=".chp-relay/chunks/${BASE}"
+          rm -rf "$OUT"
+          mkdir -p "$OUT"
+          split -b 40000 -d -a 4 "$FILE" "$OUT/part-"
+          : > "$OUT/manifest.txt"
+          for P in "$OUT"/part-*; do
+            printf '%s %s %s\n' "$(basename "$P")" "$(wc -c < "$P")" "$(sha256sum "$P" | awk '{print $1}')" >> "$OUT/manifest.txt"
+          done
+          printf 'source=%s\nsource_bytes=%s\nsource_sha256=%s\n' "$FILE" "$(wc -c < "$FILE")" "$(sha256sum "$FILE" | awk '{print $1}')" >> "$OUT/manifest.txt"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add "$OUT"
+          git commit -m "chp: split encrypted provider response ${BASE}"
+          git push origin HEAD:chp-live-provider-20260917
+          echo "CHP_SPLITTER=PASS BASE=${BASE} PARTS=$(find "$OUT" -type f -name 'part-*' | wc -l)"
