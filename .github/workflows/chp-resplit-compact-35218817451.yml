@@ -1,0 +1,37 @@
+name: CHP Resplit Compact Cipher 35218817451
+
+on:
+  push:
+    branches:
+      - chp-live-provider-20260917
+    paths:
+      - .github/workflows/chp-resplit-compact-35218817451.yml
+
+permissions:
+  contents: write
+
+jobs:
+  resplit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          ref: chp-live-provider-20260917
+      - name: Reassemble and split compact ciphertext
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE='.chp-extract-gz/result-35218817451'
+          cat "$BASE/part-0001.txt" "$BASE/part-0002.txt" > /tmp/compact.b64
+          test "$(wc -c < /tmp/compact.b64)" = '64344'
+          test "$(sha256sum /tmp/compact.b64 | awk '{print $1}')" = '62bd4d43fceee2956f36c577233679ecdb160eed347cdb84f4cc19c652760f7c'
+          OUT='.chp-extract-gz/small-35218817451'
+          rm -rf "$OUT"; mkdir -p "$OUT"
+          split -b 8000 -d -a 3 /tmp/compact.b64 "$OUT/part-"
+          : > "$OUT/manifest.txt"
+          COUNT=0
+          for P in "$OUT"/part-*; do COUNT=$((COUNT+1)); printf '%s %s %s\n' "$(basename "$P")" "$(wc -c < "$P")" "$(sha256sum "$P"|awk '{print $1}')" >> "$OUT/manifest.txt"; done
+          printf 'source_bytes 64344\nsource_sha256 62bd4d43fceee2956f36c577233679ecdb160eed347cdb84f4cc19c652760f7c\npart_count %s\n' "$COUNT" >> "$OUT/manifest.txt"
+          git config user.name 'github-actions[bot]'; git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add "$OUT"; git commit -m 'chp: resplit compact encrypted final response 35218817451'; git push origin HEAD:chp-live-provider-20260917
