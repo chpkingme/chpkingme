@@ -58,26 +58,15 @@ jobs:
           set -e
           echo "CHP_CURL_RC=${CURL_RC}"
           echo "CHP_HTTP_CODE=${HTTP_CODE}"
-          python3 - <<'PY'
-import json,re
-from pathlib import Path
-p=Path('/tmp/resp.json')
-raw=p.read_text('utf-8',errors='replace') if p.exists() else ''
-raw=re.sub(r'ark-[A-Za-z0-9_-]{8,}', '[REDACTED_KEY]', raw)
-raw=re.sub(r'(?i)bearer\s+[A-Za-z0-9._~-]+', 'Bearer [REDACTED]', raw)
-try:
-    obj=json.loads(raw)
-    safe={}
-    for k in ('id','object','status','model','error','output','usage'):
-        if k in obj:
-            safe[k]=obj[k]
-    out=json.dumps(safe,ensure_ascii=False)[:12000]
-except Exception:
-    out=raw[:12000]
-print('CHP_RESPONSE_BEGIN')
-print(out)
-print('CHP_RESPONSE_END')
-PY
+          echo 'CHP_RESPONSE_BEGIN'
+          if jq -e . /tmp/resp.json >/dev/null 2>&1; then
+            jq -c '{id,object,status,model,error,output,usage}' /tmp/resp.json | head -c 12000
+            echo
+          else
+            head -c 12000 /tmp/resp.json | sed -E 's/ark-[A-Za-z0-9_-]{8,}/[REDACTED_KEY]/g'
+            echo
+          fi
+          echo 'CHP_RESPONSE_END'
           if [ "$CURL_RC" -ne 0 ]; then
             exit 51
           fi
