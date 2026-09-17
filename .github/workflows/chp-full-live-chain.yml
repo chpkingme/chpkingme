@@ -1,0 +1,80 @@
+name: CHP Encrypted Full Live Chain
+
+on:
+  push:
+    branches:
+      - chp-live-provider-20260917
+    paths:
+      - .github/workflows/chp-full-live-chain.yml
+
+permissions:
+  contents: write
+
+jobs:
+  full-live-chain:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - name: Publish one-time public key
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out /tmp/full_private.pem >/dev/null 2>&1
+          openssl pkey -in /tmp/full_private.pem -pubout -out /tmp/full_public.pem >/dev/null 2>&1
+          PUB_B64="$(base64 -w0 /tmp/full_public.pem)"
+          CONTENT="$(printf '%s' "$PUB_B64" | base64 -w0)"
+          API="https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/.chp-full/pubkey-${GITHUB_RUN_ID}.b64"
+          curl -fsSL -X PUT -H "Authorization: Bearer ${GH_TOKEN}" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "$API" -d "{\"message\":\"chp: publish full-run public key ${GITHUB_RUN_ID}\",\"content\":\"${CONTENT}\",\"branch\":\"${GITHUB_REF_NAME}\"}" >/dev/null
+          echo "CHP_FULL_PUBLIC_KEY=.chp-full/pubkey-${GITHUB_RUN_ID}.b64"
+
+      - name: Run HOTFIX4 production core with live Ark
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          cleanup(){ rm -rf /tmp/chp-full /tmp/full_private.pem /tmp/full_public.pem /tmp/session.b64 /tmp/session.bin /tmp/session.json /tmp/api_key.txt /tmp/bundle_pass.txt /tmp/bundle.b64 /tmp/bundle.enc /tmp/result.tar.gz /tmp/result.enc /tmp/result.b64; }
+          trap cleanup EXIT
+          mkdir -p /tmp/chp-full
+          BASE="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_REF_NAME}/.chp-full"
+          found=0
+          for i in $(seq 1 1200); do
+            if curl -fsSL --connect-timeout 5 "${BASE}/session-${GITHUB_RUN_ID}.b64?nonce=${i}" -o /tmp/session.b64 2>/dev/null && [ -s /tmp/session.b64 ] && curl -fsSL --connect-timeout 5 "${BASE}/bundle-${GITHUB_RUN_ID}.b64?nonce=${i}" -o /tmp/bundle.b64 2>/dev/null && [ -s /tmp/bundle.b64 ]; then found=1; break; fi
+            sleep 3
+          done
+          if [ "$found" -ne 1 ]; then echo 'CHP_FULL_STATE=INPUT_NOT_RECEIVED'; exit 42; fi
+          base64 -d /tmp/session.b64 > /tmp/session.bin
+          openssl pkeyutl -decrypt -inkey /tmp/full_private.pem -in /tmp/session.bin -out /tmp/session.json -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256
+          jq -e '.api_key and .bundle_pass and .bundle_sha256' /tmp/session.json >/dev/null
+          jq -r '.api_key' /tmp/session.json > /tmp/api_key.txt
+          jq -r '.bundle_pass' /tmp/session.json > /tmp/bundle_pass.txt
+          EXPECTED="$(jq -r '.bundle_sha256' /tmp/session.json)"
+          API_KEY="$(cat /tmp/api_key.txt)"
+          echo "::add-mask::${API_KEY}"
+          base64 -d /tmp/bundle.b64 > /tmp/bundle.enc
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass file:/tmp/bundle_pass.txt -in /tmp/bundle.enc -out /tmp/chp-production-core.tar.gz
+          ACTUAL="$(sha256sum /tmp/chp-production-core.tar.gz | awk '{print $1}')"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then echo 'CHP_FULL_STATE=BUNDLE_SHA_MISMATCH'; exit 43; fi
+          tar -xzf /tmp/chp-production-core.tar.gz -C /tmp/chp-full
+          export ARK_API_KEY="$API_KEY"
+          export CHP_RUN_ROOT=/tmp/chp-full/run-output
+          set +e
+          node /tmp/chp-full/runner-live.js > /tmp/chp-full/runner.log 2>&1
+          RC=$?
+          set -e
+          unset ARK_API_KEY API_KEY
+          printf '%s\n' "$RC" > /tmp/chp-full/exit-code.txt
+          tar -C /tmp/chp-full -czf /tmp/result.tar.gz run-output runner.log exit-code.txt
+          openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass file:/tmp/bundle_pass.txt -in /tmp/result.tar.gz -out /tmp/result.enc
+          base64 -w0 /tmp/result.enc > /tmp/result.b64
+          RESULT_B64="$(cat /tmp/result.b64)"
+          CONTENT="$(printf '%s' "$RESULT_B64" | base64 -w0)"
+          API="https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/.chp-full/result-${GITHUB_RUN_ID}.b64"
+          curl -fsSL -X PUT -H "Authorization: Bearer ${GH_TOKEN}" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "$API" -d "{\"message\":\"chp: encrypted full live result ${GITHUB_RUN_ID}\",\"content\":\"${CONTENT}\",\"branch\":\"${GITHUB_REF_NAME}\"}" >/dev/null
+          echo "CHP_FULL_RUN_EXIT=${RC}"
+          if [ "$RC" -ne 0 ]; then exit "$RC"; fi
+          echo 'CHP_FULL_STATE=PASS'
