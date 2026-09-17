@@ -1,0 +1,87 @@
+name: CHP Live Provider Probe
+
+on:
+  push:
+    branches:
+      - chp-live-provider-20260917
+    paths:
+      - .github/workflows/chp-live-provider-probe.yml
+
+permissions:
+  contents: read
+
+jobs:
+  live-provider-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Generate one-time RSA keypair
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out /tmp/chp_private.pem >/dev/null 2>&1
+          openssl pkey -in /tmp/chp_private.pem -pubout -out /tmp/chp_public.pem >/dev/null 2>&1
+          printf 'CHP_PUBLIC_KEY_B64='
+          base64 -w0 /tmp/chp_public.pem
+          printf '\n'
+
+      - name: Wait for encrypted credential and call Ark Responses
+        shell: bash
+        env:
+          CIPHER_URL: https://raw.githubusercontent.com/chpkingme/chpkingme/chp-live-provider-20260917/.chp-live/cipher.b64
+          ARK_URL: https://ark.cn-beijing.volces.com/api/plan/v3/responses
+          MODEL_ID: deepseek-v4-pro
+        run: |
+          set -euo pipefail
+          trap 'rm -f /tmp/chp_private.pem /tmp/chp_public.pem /tmp/cipher.b64 /tmp/cipher.bin /tmp/apikey.txt /tmp/resp.json /tmp/headers.txt' EXIT
+          found=0
+          for i in $(seq 1 180); do
+            if curl -fsSL --connect-timeout 5 "${CIPHER_URL}?nonce=${GITHUB_RUN_ID}-${i}" -o /tmp/cipher.b64 2>/dev/null && [ -s /tmp/cipher.b64 ]; then
+              found=1
+              break
+            fi
+            sleep 3
+          done
+          if [ "$found" -ne 1 ]; then
+            echo 'CHP_PROBE_ERROR=CIPHER_NOT_RECEIVED'
+            exit 42
+          fi
+          base64 -d /tmp/cipher.b64 > /tmp/cipher.bin
+          openssl pkeyutl -decrypt -inkey /tmp/chp_private.pem -in /tmp/cipher.bin -out /tmp/apikey.txt -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256
+          API_KEY="$(cat /tmp/apikey.txt)"
+          echo "::add-mask::${API_KEY}"
+          payload='{"model":"deepseek-v4-pro","input":"Reply with exactly CHP_API_OK and nothing else.","max_output_tokens":64,"stream":false}'
+          set +e
+          HTTP_CODE=$(curl -sS --connect-timeout 15 --max-time 180 -D /tmp/headers.txt -o /tmp/resp.json -w '%{http_code}' -H "Authorization: Bearer ${API_KEY}" -H 'Content-Type: application/json' --data "$payload" "$ARK_URL")
+          CURL_RC=$?
+          set -e
+          echo "CHP_CURL_RC=${CURL_RC}"
+          echo "CHP_HTTP_CODE=${HTTP_CODE}"
+          python3 - <<'PY'
+import json,re
+from pathlib import Path
+p=Path('/tmp/resp.json')
+raw=p.read_text('utf-8',errors='replace') if p.exists() else ''
+raw=re.sub(r'ark-[A-Za-z0-9_-]{8,}', '[REDACTED_KEY]', raw)
+raw=re.sub(r'(?i)bearer\s+[A-Za-z0-9._~-]+', 'Bearer [REDACTED]', raw)
+try:
+    obj=json.loads(raw)
+    safe={}
+    for k in ('id','object','status','model','error','output','usage'):
+        if k in obj:
+            safe[k]=obj[k]
+    out=json.dumps(safe,ensure_ascii=False)[:12000]
+except Exception:
+    out=raw[:12000]
+print('CHP_RESPONSE_BEGIN')
+print(out)
+print('CHP_RESPONSE_END')
+PY
+          if [ "$CURL_RC" -ne 0 ]; then
+            exit 51
+          fi
+          case "$HTTP_CODE" in
+            2??) echo 'CHP_PROBE_RESULT=PASS' ;;
+            *) echo 'CHP_PROBE_RESULT=HTTP_FAIL'; exit 52 ;;
+          esac
