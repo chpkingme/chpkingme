@@ -37,7 +37,7 @@ jobs:
           ARK_URL: https://ark.cn-beijing.volces.com/api/plan/v3/responses
         run: |
           set -euo pipefail
-          trap 'rm -f /tmp/chp_relay_private.pem /tmp/chp_relay_public.pem /tmp/session.b64 /tmp/session.bin /tmp/session.json /tmp/session.pass /tmp/apikey.txt /tmp/request.b64 /tmp/request.enc /tmp/request.json /tmp/response.raw /tmp/headers.txt /tmp/response.json /tmp/response.enc /tmp/response.b64 /tmp/stop.txt' EXIT
+          trap 'rm -f /tmp/chp_relay_private.pem /tmp/chp_relay_public.pem /tmp/session.b64 /tmp/session.bin /tmp/session.json /tmp/session.pass /tmp/apikey.txt /tmp/request.b64 /tmp/request.enc /tmp/request.json /tmp/response.raw /tmp/headers.txt /tmp/body.b64 /tmp/response.json /tmp/response.enc /tmp/response.b64 /tmp/github-content.b64 /tmp/upload.json /tmp/stop.txt' EXIT
           SESSION_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_REF_NAME}/.chp-relay/session-${GITHUB_RUN_ID}.b64"
           found=0
           for i in $(seq 1 240); do
@@ -73,15 +73,16 @@ jobs:
             CURL_RC=$?
             set -e
             CONTENT_TYPE=$(awk 'BEGIN{IGNORECASE=1} /^content-type:/{sub(/\r$/,""); sub(/^[^:]+:[[:space:]]*/,""); v=$0} END{print v}' /tmp/headers.txt)
-            BODY_B64=$(base64 -w0 /tmp/response.raw)
-            jq -n --arg seq "$PAD" --arg ct "$CONTENT_TYPE" --arg body "$BODY_B64" --argjson rc "$CURL_RC" --argjson code "${HTTP_CODE:-0}" '{schema:"chp.encrypted-provider-wire.v1",seq:$seq,curl_rc:$rc,http_code:$code,content_type:$ct,body_b64:$body}' > /tmp/response.json
+            base64 -w0 /tmp/response.raw > /tmp/body.b64
+            jq -n --arg seq "$PAD" --arg ct "$CONTENT_TYPE" --rawfile body /tmp/body.b64 --argjson rc "$CURL_RC" --argjson code "${HTTP_CODE:-0}" '{schema:"chp.encrypted-provider-wire.v1",seq:$seq,curl_rc:$rc,http_code:$code,content_type:$ct,body_b64:$body}' > /tmp/response.json
             openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass file:/tmp/session.pass -in /tmp/response.json -out /tmp/response.enc
             base64 -w0 /tmp/response.enc > /tmp/response.b64
-            RESP_B64="$(cat /tmp/response.b64)"
-            CONTENT="$(printf '%s' "$RESP_B64" | base64 -w0)"
+            base64 -w0 /tmp/response.b64 > /tmp/github-content.b64
             API="https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/.chp-relay/response-${GITHUB_RUN_ID}-${PAD}.b64"
-            curl -fsSL -X PUT -H "Authorization: Bearer ${GH_TOKEN}" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "$API" -d "{\"message\":\"chp: encrypted provider response ${GITHUB_RUN_ID}-${PAD}\",\"content\":\"${CONTENT}\",\"branch\":\"${GITHUB_REF_NAME}\"}" >/dev/null
-            echo "CHP_RELAY_RESPONSE=${PAD} HTTP=${HTTP_CODE} CURL=${CURL_RC}"
+            MSG="chp: encrypted provider response ${GITHUB_RUN_ID}-${PAD}"
+            jq -n --arg message "$MSG" --rawfile content /tmp/github-content.b64 --arg branch "$GITHUB_REF_NAME" '{message:$message,content:$content,branch:$branch}' > /tmp/upload.json
+            curl -fsSL -X PUT -H "Authorization: Bearer ${GH_TOKEN}" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "$API" --data-binary @/tmp/upload.json >/dev/null
+            echo "CHP_RELAY_RESPONSE=${PAD} HTTP=${HTTP_CODE} CURL=${CURL_RC} RAW_BYTES=$(wc -c < /tmp/response.raw)"
             seq=$((seq+1))
           done
           echo 'CHP_RELAY_STATE=FINISHED'
