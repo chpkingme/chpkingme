@@ -8,33 +8,42 @@ on:
       - .github/workflows/chp-live-provider-probe.yml
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   live-provider-probe:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Generate one-time RSA keypair
+      - name: Generate and publish one-time RSA public key
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           umask 077
           openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out /tmp/chp_private.pem >/dev/null 2>&1
           openssl pkey -in /tmp/chp_private.pem -pubout -out /tmp/chp_public.pem >/dev/null 2>&1
-          printf 'CHP_PUBLIC_KEY_B64='
-          base64 -w0 /tmp/chp_public.pem
-          printf '\n'
+          PUB_B64="$(base64 -w0 /tmp/chp_public.pem)"
+          BODY="$(printf '%s' "$PUB_B64" | base64 -w0)"
+          API="https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/.chp-live/pubkey-${GITHUB_RUN_ID}.b64"
+          curl -fsSL -X PUT \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "$API" \
+            -d "{\"message\":\"chp: publish one-time provider public key ${GITHUB_RUN_ID}\",\"content\":\"${BODY}\",\"branch\":\"${GITHUB_REF_NAME}\"}" >/dev/null
+          echo "CHP_PUBLIC_KEY_FILE=.chp-live/pubkey-${GITHUB_RUN_ID}.b64"
 
       - name: Wait for encrypted credential and call Ark Responses
         shell: bash
         env:
-          CIPHER_URL: https://raw.githubusercontent.com/chpkingme/chpkingme/chp-live-provider-20260917/.chp-live/cipher.b64
           ARK_URL: https://ark.cn-beijing.volces.com/api/plan/v3/responses
           MODEL_ID: deepseek-v4-pro
         run: |
           set -euo pipefail
           trap 'rm -f /tmp/chp_private.pem /tmp/chp_public.pem /tmp/cipher.b64 /tmp/cipher.bin /tmp/apikey.txt /tmp/resp.json /tmp/headers.txt' EXIT
+          CIPHER_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_REF_NAME}/.chp-live/cipher-${GITHUB_RUN_ID}.b64"
           found=0
           for i in $(seq 1 180); do
             if curl -fsSL --connect-timeout 5 "${CIPHER_URL}?nonce=${GITHUB_RUN_ID}-${i}" -o /tmp/cipher.b64 2>/dev/null && [ -s /tmp/cipher.b64 ]; then
