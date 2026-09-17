@@ -1,4 +1,4 @@
-name: CHP Live Provider Probe
+name: CHP Encrypted Live Provider Relay
 
 on:
   push:
@@ -11,75 +11,77 @@ permissions:
   contents: write
 
 jobs:
-  live-provider-probe:
+  encrypted-provider-relay:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 120
     steps:
-      - name: Generate and publish one-time RSA public key
+      - name: Generate and publish one-time relay public key
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           umask 077
-          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out /tmp/chp_private.pem >/dev/null 2>&1
-          openssl pkey -in /tmp/chp_private.pem -pubout -out /tmp/chp_public.pem >/dev/null 2>&1
-          PUB_B64="$(base64 -w0 /tmp/chp_public.pem)"
-          BODY="$(printf '%s' "$PUB_B64" | base64 -w0)"
-          API="https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/.chp-live/pubkey-${GITHUB_RUN_ID}.b64"
-          curl -fsSL -X PUT \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H 'Accept: application/vnd.github+json' \
-            -H 'X-GitHub-Api-Version: 2022-11-28' \
-            "$API" \
-            -d "{\"message\":\"chp: publish one-time provider public key ${GITHUB_RUN_ID}\",\"content\":\"${BODY}\",\"branch\":\"${GITHUB_REF_NAME}\"}" >/dev/null
-          echo "CHP_PUBLIC_KEY_FILE=.chp-live/pubkey-${GITHUB_RUN_ID}.b64"
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out /tmp/chp_relay_private.pem >/dev/null 2>&1
+          openssl pkey -in /tmp/chp_relay_private.pem -pubout -out /tmp/chp_relay_public.pem >/dev/null 2>&1
+          PUB_B64="$(base64 -w0 /tmp/chp_relay_public.pem)"
+          CONTENT="$(printf '%s' "$PUB_B64" | base64 -w0)"
+          API="https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/.chp-relay/pubkey-${GITHUB_RUN_ID}.b64"
+          curl -fsSL -X PUT -H "Authorization: Bearer ${GH_TOKEN}" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "$API" -d "{\"message\":\"chp: publish encrypted relay public key ${GITHUB_RUN_ID}\",\"content\":\"${CONTENT}\",\"branch\":\"${GITHUB_REF_NAME}\"}" >/dev/null
+          echo "CHP_RELAY_PUBLIC_KEY=.chp-relay/pubkey-${GITHUB_RUN_ID}.b64"
 
-      - name: Wait for encrypted credential and call Ark Responses
+      - name: Run encrypted Ark Responses relay
         shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
           ARK_URL: https://ark.cn-beijing.volces.com/api/plan/v3/responses
-          MODEL_ID: deepseek-v4-pro
         run: |
           set -euo pipefail
-          trap 'rm -f /tmp/chp_private.pem /tmp/chp_public.pem /tmp/cipher.b64 /tmp/cipher.bin /tmp/apikey.txt /tmp/resp.json /tmp/headers.txt' EXIT
-          CIPHER_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_REF_NAME}/.chp-live/cipher-${GITHUB_RUN_ID}.b64"
+          trap 'rm -f /tmp/chp_relay_private.pem /tmp/chp_relay_public.pem /tmp/session.b64 /tmp/session.bin /tmp/session.json /tmp/session.pass /tmp/apikey.txt /tmp/request.b64 /tmp/request.enc /tmp/request.json /tmp/response.raw /tmp/headers.txt /tmp/response.json /tmp/response.enc /tmp/response.b64 /tmp/stop.txt' EXIT
+          SESSION_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_REF_NAME}/.chp-relay/session-${GITHUB_RUN_ID}.b64"
           found=0
-          for i in $(seq 1 180); do
-            if curl -fsSL --connect-timeout 5 "${CIPHER_URL}?nonce=${GITHUB_RUN_ID}-${i}" -o /tmp/cipher.b64 2>/dev/null && [ -s /tmp/cipher.b64 ]; then
-              found=1
-              break
-            fi
+          for i in $(seq 1 240); do
+            if curl -fsSL --connect-timeout 5 "${SESSION_URL}?nonce=${GITHUB_RUN_ID}-${i}" -o /tmp/session.b64 2>/dev/null && [ -s /tmp/session.b64 ]; then found=1; break; fi
             sleep 3
           done
-          if [ "$found" -ne 1 ]; then
-            echo 'CHP_PROBE_ERROR=CIPHER_NOT_RECEIVED'
-            exit 42
-          fi
-          base64 -d /tmp/cipher.b64 > /tmp/cipher.bin
-          openssl pkeyutl -decrypt -inkey /tmp/chp_private.pem -in /tmp/cipher.bin -out /tmp/apikey.txt -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256
+          if [ "$found" -ne 1 ]; then echo 'CHP_RELAY_ERROR=SESSION_NOT_RECEIVED'; exit 42; fi
+          base64 -d /tmp/session.b64 > /tmp/session.bin
+          openssl pkeyutl -decrypt -inkey /tmp/chp_relay_private.pem -in /tmp/session.bin -out /tmp/session.json -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256
+          jq -e '.api_key and .session_pass' /tmp/session.json >/dev/null
+          jq -r '.api_key' /tmp/session.json > /tmp/apikey.txt
+          jq -r '.session_pass' /tmp/session.json > /tmp/session.pass
+          chmod 600 /tmp/apikey.txt /tmp/session.pass
           API_KEY="$(cat /tmp/apikey.txt)"
           echo "::add-mask::${API_KEY}"
-          payload='{"model":"deepseek-v4-pro","input":"Reply with exactly CHP_API_OK and nothing else.","max_output_tokens":64,"stream":false}'
-          set +e
-          HTTP_CODE=$(curl -sS --connect-timeout 15 --max-time 180 -D /tmp/headers.txt -o /tmp/resp.json -w '%{http_code}' -H "Authorization: Bearer ${API_KEY}" -H 'Content-Type: application/json' --data "$payload" "$ARK_URL")
-          CURL_RC=$?
-          set -e
-          echo "CHP_CURL_RC=${CURL_RC}"
-          echo "CHP_HTTP_CODE=${HTTP_CODE}"
-          echo 'CHP_RESPONSE_BEGIN'
-          if jq -e . /tmp/resp.json >/dev/null 2>&1; then
-            jq -c '{id,object,status,model,error,output,usage}' /tmp/resp.json | head -c 12000
-            echo
-          else
-            head -c 12000 /tmp/resp.json | sed -E 's/ark-[A-Za-z0-9_-]{8,}/[REDACTED_KEY]/g'
-            echo
-          fi
-          echo 'CHP_RESPONSE_END'
-          if [ "$CURL_RC" -ne 0 ]; then
-            exit 51
-          fi
-          case "$HTTP_CODE" in
-            2??) echo 'CHP_PROBE_RESULT=PASS' ;;
-            *) echo 'CHP_PROBE_RESULT=HTTP_FAIL'; exit 52 ;;
-          esac
+          echo 'CHP_RELAY_STATE=READY'
+          seq=1
+          idle=0
+          while [ "$seq" -le 80 ]; do
+            PAD=$(printf '%04d' "$seq")
+            STOP_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_REF_NAME}/.chp-relay/stop-${GITHUB_RUN_ID}.txt"
+            if curl -fsSL --connect-timeout 3 "${STOP_URL}?nonce=${seq}" -o /tmp/stop.txt 2>/dev/null; then echo 'CHP_RELAY_STATE=STOP_REQUESTED'; break; fi
+            REQ_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_REF_NAME}/.chp-relay/request-${GITHUB_RUN_ID}-${PAD}.b64"
+            if ! curl -fsSL --connect-timeout 5 "${REQ_URL}?nonce=${GITHUB_RUN_ID}-${PAD}-${idle}" -o /tmp/request.b64 2>/dev/null; then
+              idle=$((idle+1)); if [ "$idle" -gt 1200 ]; then echo 'CHP_RELAY_STATE=IDLE_TIMEOUT'; exit 43; fi; sleep 3; continue
+            fi
+            idle=0
+            base64 -d /tmp/request.b64 > /tmp/request.enc
+            openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass file:/tmp/session.pass -in /tmp/request.enc -out /tmp/request.json
+            jq -e 'type=="object" and .model' /tmp/request.json >/dev/null
+            set +e
+            HTTP_CODE=$(curl -sS --connect-timeout 20 --max-time 1800 -D /tmp/headers.txt -o /tmp/response.raw -w '%{http_code}' -H "Authorization: Bearer ${API_KEY}" -H 'Content-Type: application/json' --data-binary @/tmp/request.json "$ARK_URL")
+            CURL_RC=$?
+            set -e
+            CONTENT_TYPE=$(awk 'BEGIN{IGNORECASE=1} /^content-type:/{sub(/\r$/,""); sub(/^[^:]+:[[:space:]]*/,""); v=$0} END{print v}' /tmp/headers.txt)
+            BODY_B64=$(base64 -w0 /tmp/response.raw)
+            jq -n --arg seq "$PAD" --arg ct "$CONTENT_TYPE" --arg body "$BODY_B64" --argjson rc "$CURL_RC" --argjson code "${HTTP_CODE:-0}" '{schema:"chp.encrypted-provider-wire.v1",seq:$seq,curl_rc:$rc,http_code:$code,content_type:$ct,body_b64:$body}' > /tmp/response.json
+            openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass file:/tmp/session.pass -in /tmp/response.json -out /tmp/response.enc
+            base64 -w0 /tmp/response.enc > /tmp/response.b64
+            RESP_B64="$(cat /tmp/response.b64)"
+            CONTENT="$(printf '%s' "$RESP_B64" | base64 -w0)"
+            API="https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/.chp-relay/response-${GITHUB_RUN_ID}-${PAD}.b64"
+            curl -fsSL -X PUT -H "Authorization: Bearer ${GH_TOKEN}" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "$API" -d "{\"message\":\"chp: encrypted provider response ${GITHUB_RUN_ID}-${PAD}\",\"content\":\"${CONTENT}\",\"branch\":\"${GITHUB_REF_NAME}\"}" >/dev/null
+            echo "CHP_RELAY_RESPONSE=${PAD} HTTP=${HTTP_CODE} CURL=${CURL_RC}"
+            seq=$((seq+1))
+          done
+          echo 'CHP_RELAY_STATE=FINISHED'
