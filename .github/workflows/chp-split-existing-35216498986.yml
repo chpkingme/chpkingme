@@ -1,0 +1,44 @@
+name: CHP Split Existing Encrypted Response 35216498986
+
+on:
+  push:
+    branches:
+      - chp-live-provider-20260917
+    paths:
+      - .github/workflows/chp-split-existing-35216498986.yml
+
+permissions:
+  contents: write
+
+jobs:
+  split-existing:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          ref: chp-live-provider-20260917
+      - name: Split existing encrypted response
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC='.chp-relay/response-35216498986-0001.b64'
+          NAME='response-35216498986-0001'
+          OUT=".chp-relay/chunks/${NAME}"
+          test -s "$SRC"
+          rm -rf "$OUT"
+          mkdir -p "$OUT"
+          split -b 48000 -d -a 4 "$SRC" "$OUT/part-"
+          : > "$OUT/manifest.txt"
+          COUNT=0
+          for P in "$OUT"/part-*; do
+            COUNT=$((COUNT+1))
+            printf '%s %s %s\n' "$(basename "$P")" "$(wc -c < "$P")" "$(sha256sum "$P" | awk '{print $1}')" >> "$OUT/manifest.txt"
+          done
+          printf 'source_bytes %s\nsource_sha256 %s\npart_count %s\n' "$(wc -c < "$SRC")" "$(sha256sum "$SRC" | awk '{print $1}')" "$COUNT" >> "$OUT/manifest.txt"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add "$OUT"
+          git commit -m 'chp: split existing encrypted response 35216498986-0001'
+          git push origin HEAD:chp-live-provider-20260917
+          echo "CHP_EXISTING_SPLIT=PASS PARTS=${COUNT}"
