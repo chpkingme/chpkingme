@@ -5,7 +5,7 @@ on:
     branches:
       - main
     paths:
-      - .github/workflows/chp-live-provider-probe-main.yml
+      - .chp-live/trigger.txt
 
 permissions:
   contents: read
