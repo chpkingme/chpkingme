@@ -1,0 +1,29 @@
+name: RF22 public source probe
+
+on:
+  push:
+    branches:
+      - chp-live-provider-20260917
+    paths:
+      - rf22-netprobe.sh
+      - .github/workflows/rf22-netprobe.yml
+
+permissions:
+  contents: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run probe
+        shell: bash
+        run: bash rf22-netprobe.sh
+      - name: Publish result
+        shell: bash
+        run: |
+          git config user.name "chp-netprobe"
+          git config user.email "chp-netprobe@users.noreply.github.com"
+          git add rf22-public-source-reachability.csv
+          git commit -m "chp: RF22 public source probe result" || exit 0
+          git push
